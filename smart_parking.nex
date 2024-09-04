@@ -1,186 +1,65 @@
-pragma nexScript ^0.1.0;
+pragma nexscript ^1.0.2;
 
 /**
  * @title Smart Parking Rental Smart Contract
- * @dev This smart contract facilitates the decentralized rental of private parking spots.
+ * @dev This contract facilitates decentralized rental of private parking spots.
  * It allows parking spot owners to register their spaces, and users to reserve them for specific time periods.
- * The contract manages payments, deposits, and penalties automatically through blockchain transactions.
- * The platform owner earns revenue by collecting a fee from each reservation transaction.
- * This contract is implemented in NexScript and is designed to be deployed in a NexScript-compatible environment.
+ * Payments and penalties are managed automatically through blockchain transactions.
  */
 
-
-// Contract definition in NexScript
-contract ParkingRental {
-
-    // Structure to define a Parking Spot
-    struct ParkingSpot {
-        uint id; // Unique identifier for the parking spot
-        address owner; // Address of the owner of the parking spot
-        uint pricePerHour; // Price per hour for renting the parking spot
-        uint deposit; // Deposit amount required for reserving the parking spot
-    }
-    
-    // Structure to define a Reservation
-    struct Reservation {
-        address renter; // Address of the person who reserved the spot
-        uint startTime; // Start time of the reservation (Unix timestamp)
-        uint endTime; // End time of the reservation (Unix timestamp)
-        uint depositPaid; // Amount of deposit paid by the renter
-        address nextRenter; // Address of the next renter, if applicable
-        bool active; // Status of the reservation (active or not)
-    }
-    
-    // Mapping to store parking spots by their unique ID
-    mapping(uint => ParkingSpot) public parkingSpots;
-    
-    // Mapping to store the current reservation for each parking spot by ID
-    mapping(uint => Reservation) public currentReservation;
-    
-    // Mapping to store all parking spots owned by a specific owner
-    mapping(address => uint[]) public ownerParkingSpots;
-
-    // Variable to keep track of the next parking spot ID
-    uint public nextParkingSpotId;
-
-    // Address of the platform owner (the application owner)
-    address public platformOwner;
-
-    // Percentage of the platform fee (e.g., 5 means 5%)
-    uint public platformFeePercent;
-
-    // Events to log significant actions for external monitoring
-    event ParkingSpotRegistered(uint parkingSpotId, address owner);
-    event ReservationMade(uint parkingSpotId, address renter, uint startTime, uint endTime);
-    event ReservationCancelled(uint parkingSpotId, address renter, uint refundAmount);
-    event PenaltyApplied(uint parkingSpotId, address renter, uint penaltyAmount);
-    event NextRenterUpdated(uint parkingSpotId, address nextRenter);
-    event PlatformFeeCollected(uint amount, address platformOwner);
-    
-    // Constructor to initialize the contract with platform fee
-    function constructor(uint _platformFeePercent) {
-        platformOwner = msg.sender; // Set the platform owner to the address deploying the contract
-        platformFeePercent = _platformFeePercent; // Set the platform fee percentage
-    }
-
-    // Function to register a new parking spot
-    function registerParkingSpot(uint _pricePerHour, uint _deposit) public {
-        uint parkingSpotId = nextParkingSpotId++; // Generate a new unique parking spot ID
-        parkingSpots[parkingSpotId] = ParkingSpot({
-            id: parkingSpotId,
-            owner: msg.sender,
-            pricePerHour: _pricePerHour,
-            deposit: _deposit
-        });
-        
-        // Add the parking spot ID to the owner's list of parking spots
-        ownerParkingSpots[msg.sender].push(parkingSpotId);
-
-        // Emit an event for the registration of the new parking spot
-        emit ParkingSpotRegistered(parkingSpotId, msg.sender);
-    }
-
+contract ParkingRental(
+    pubkey platformOwnerPk,  // Public key of the platform owner
+    int platformFeePercent   // Percentage fee taken by the platform
+) {
     // Function to make a reservation for a parking spot
-    function makeReservation(uint _parkingSpotId, uint _startTime, uint _endTime) public payable {
-        ParkingSpot storage spot = parkingSpots[_parkingSpotId];
-        require(currentReservation[_parkingSpotId].active == false, "Parking spot is currently reserved");
-        require(msg.value >= spot.deposit, "Insufficient deposit paid");
-        
-        uint rentalCost = spot.pricePerHour * (_endTime - _startTime) / 1 hours;
-        uint platformFee = (rentalCost * platformFeePercent) / 100;
-        uint amountDue = rentalCost + spot.deposit;
+    function makeReservation(
+        pubkey ownerPk,
+        pubkey renterPk,
+        int startTime,
+        int endTime,
+        int depositPaid,
+        int pricePerHour,
+        sig renterSig
+    ) {
+        // Verify the renter's signature
+        require(checkSig(renterSig, renterPk));
 
-        require(msg.value >= amountDue, "Insufficient payment");
+        // Calculate rental cost and platform fee
+        int rentalCost = pricePerHour * (endTime - startTime) / 3600;  // Assuming time in seconds
+        int platformFee = rentalCost * platformFeePercent / 100;
 
-        // Platform takes its share as a fee
-        payable(platformOwner).transfer(platformFee);
-        emit PlatformFeeCollected(platformFee, platformOwner);
+        // Ensure the renter has paid at least the deposit and cost
+        require(depositPaid >= rentalCost + depositPaid);  // Adjusted to use depositPaid correctly
 
-        // Record the current reservation
-        currentReservation[_parkingSpotId] = Reservation({
-            renter: msg.sender,
-            startTime: _startTime,
-            endTime: _endTime,
-            depositPaid: msg.value,
-            nextRenter: address(0),
-            active: true
-        });
-
-        emit ReservationMade(_parkingSpotId, msg.sender, _startTime, _endTime);
+        // Platform fee logic
+        int payoutToOwner = rentalCost - platformFee;
+        require(tx.outputs[0].value == payoutToOwner);
+        require(tx.outputs[1].value == platformFee);
+        require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKT(hash160(ownerPk)));
+        require(tx.outputs[1].lockingBytecode == new LockingBytecodeP2PKT(hash160(platformOwnerPk)));
     }
 
     // Function to end a reservation and handle payments and penalties
-    function endReservation(uint _parkingSpotId) public {
-        Reservation storage reservation = currentReservation[_parkingSpotId];
-        require(reservation.active, "Reservation is not active");
-        require(msg.sender == reservation.renter, "Only the renter can end the reservation");
+    function endReservation(
+        pubkey renterPk,
+        pubkey ownerPk,
+        int depositPaid,
+        int penaltyAmount,
+        sig renterSig,
+        sig ownerSig
+    ) {
+        // Verify signatures
+        require(checkSig(renterSig, renterPk));
+        require(checkSig(ownerSig, ownerPk));
 
-        ParkingSpot storage spot = parkingSpots[_parkingSpotId];
+        // Handle penalties and refunds
+        int refundAmount = depositPaid - penaltyAmount;
+        require(refundAmount >= 0);
 
-        uint currentTime = block.timestamp;
-        uint penalty = 0;
-        if (currentTime > reservation.endTime) {
-            penalty = spot.pricePerHour * (currentTime - reservation.endTime) / 1 hours;
-            uint refundAmount = reservation.depositPaid - penalty;
-
-            // Split the penalty between the owner and next renter, if applicable
-            if (reservation.nextRenter != address(0)) {
-                uint compensation = penalty / 2;
-                spot.owner.transfer(compensation);
-                payable(reservation.nextRenter).transfer(compensation);
-            } else {
-                spot.owner.transfer(penalty);
-            }
-
-            reservation.renter.transfer(refundAmount);
-
-            emit PenaltyApplied(_parkingSpotId, msg.sender, penalty);
-        } else {
-            reservation.renter.transfer(reservation.depositPaid);
-        }
-
-        reservation.active = false;
-
-        emit ReservationCancelled(_parkingSpotId, msg.sender, reservation.depositPaid);
-    }
-    
-    // Function to update the next renter for a parking spot
-    function updateNextRenter(uint _parkingSpotId, address _nextRenter) public {
-        Reservation storage reservation = currentReservation[_parkingSpotId];
-        require(reservation.active, "Reservation is not active");
-        require(msg.sender == reservation.renter || msg.sender == parkingSpots[_parkingSpotId].owner, "Only the current renter or owner can update the next renter");
-
-        reservation.nextRenter = _nextRenter;
-
-        emit NextRenterUpdated(_parkingSpotId, _nextRenter);
-    }
-
-    // Function to apply a penalty for overstaying
-    function applyPenalty(uint _parkingSpotId, uint _penaltyAmount) public {
-        Reservation storage reservation = currentReservation[_parkingSpotId];
-        require(reservation.active, "Reservation is not active");
-        require(msg.sender == parkingSpots[_parkingSpotId].owner, "Only the owner can apply penalty");
-
-        uint refundAmount = reservation.depositPaid - _penaltyAmount;
-
-        // Split the penalty between the owner and next renter, if applicable
-        if (reservation.nextRenter != address(0)) {
-            uint compensation = _penaltyAmount / 2;
-            parkingSpots[_parkingSpotId].owner.transfer(compensation);
-            payable(reservation.nextRenter).transfer(compensation);
-        } else {
-            parkingSpots[_parkingSpotId].owner.transfer(_penaltyAmount);
-        }
-        
-        reservation.renter.transfer(refundAmount);
-
-        reservation.active = false;
-
-        emit PenaltyApplied(_parkingSpotId, reservation.renter, _penaltyAmount);
-    }
-    
-    // Function to get all parking spots owned by a specific owner
-    function getOwnerParkingSpots(address _owner) public view returns (uint[] memory) {
-        return ownerParkingSpots[_owner];
+        // Simplified logic to handle payment after penalties
+        require(tx.outputs[0].value == penaltyAmount);
+        require(tx.outputs[1].value == refundAmount);
+        require(tx.outputs[0].lockingBytecode == new LockingBytecodeP2PKT(hash160(ownerPk)));
+        require(tx.outputs[1].lockingBytecode == new LockingBytecodeP2PKT(hash160(renterPk)));
     }
 }
