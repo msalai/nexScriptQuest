@@ -1,7 +1,7 @@
 pragma nexScript ^0.1.0;
 
 /**
- * @title ParkingRental Smart Contract
+ * @title Smart Parking Rental Smart Contract
  * @dev This smart contract facilitates the decentralized rental of private parking spots.
  * It allows parking spot owners to register their spaces, and users to reserve them for specific time periods.
  * The contract manages payments, deposits, and penalties automatically through blockchain transactions.
